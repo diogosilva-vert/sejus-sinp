@@ -1,9 +1,21 @@
-.ipynb_checkpoints/
+# sistema
+.DS_Store
+Thumbs.db
+
+# python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+
+# logs
 *.log
+
+# segredos
 .env
-*.parquet
-*.csv
-.DS_Store
+.env.*
+*.key
+*.pem
+
+# artefatos locais
+evidencia_git_*.txt
