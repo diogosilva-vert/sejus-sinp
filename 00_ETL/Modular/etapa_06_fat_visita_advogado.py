@@ -3,7 +3,9 @@
 
 from contexto import *
 
-def executar(spark, path=path):
+def executar(spark, path=None):
+    if path is None:
+        path = "/data_lake/gold/intlpris/"
     """Etapa extraída do notebook original."""
     # ===== CELL 21 =====
     # ============================================================
@@ -48,7 +50,18 @@ def executar(spark, path=path):
     spark.catalog.clearCache()
     spark.sql("refresh table gold.sinp_ent_pessoa")
     spark.sql("refresh table gold.sinp_pnt_pessoa_preso")
+    spark.sql("refresh table bronze.livros_acesso_unidade_controleadvogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_historicalcontroleadvogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_vinculavisitaadvogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_historicalvinculavisitaadvogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_advogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_historicaladvogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_restricaoadvogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_historicalrestricaoadvogado")
+    spark.sql("refresh table bronze.livros_acesso_unidade_interno")
 
+    spark.sql("refresh table gold.sinp_ent_pessoa")
+    spark.sql("refresh table gold.sinp_pnt_pessoa_preso")
 
     # ============================================================
     # BASE CONTROLE ADVOGADO
@@ -73,7 +86,33 @@ def executar(spark, path=path):
             end as hr_saida,
             trim(regexp_replace(coalesce(autorizacao, ''), '\\\\s+', ' ')) as autorizacao,
             trim(regexp_replace(coalesce(motivo, ''), '\\\\s+', ' ')) as motivo
+        from (
+        select
+            id,
+            vinculos_id,
+            presidio_id,
+            equipe_id,
+            hr_entrada,
+            hr_saida,
+            data_registro,
+            autorizacao,
+            motivo
         from bronze.livros_acesso_unidade_controleadvogado
+
+        union all
+
+        select
+            id,
+            vinculos_id,
+            presidio_id,
+            equipe_id,
+            hr_entrada,
+            hr_saida,
+            data_registro,
+            autorizacao,
+            motivo
+        from bronze.livros_acesso_unidade_historicalcontroleadvogado
+    ) controleadvogado
     """)
 
     tabela = "tmp_base_controle_advogado"
@@ -105,7 +144,35 @@ def executar(spark, path=path):
             trim(regexp_replace(coalesce(advogado, ''), '\\\\s+', ' ')) as nome_advogado_vinculo,
             trim(regexp_replace(coalesce(interno, ''), '\\\\s+', ' ')) as nome_interno_vinculo,
             trim(regexp_replace(coalesce(arquivo, ''), '\\\\s+', ' ')) as arquivo
+        from (
+        select
+            id,
+            advogado_id_id,
+            interno_id_id,
+            presidio_id,
+            inativo,
+            procuracao,
+            data_registro,
+            advogado,
+            interno,
+            arquivo
         from bronze.livros_acesso_unidade_vinculavisitaadvogado
+
+        union all
+
+        select
+            id,
+            advogado_id_id,
+            interno_id_id,
+            presidio_id,
+            inativo,
+            procuracao,
+            data_registro,
+            advogado,
+            interno,
+            arquivo
+        from bronze.livros_acesso_unidade_historicalvinculavisitaadvogado
+    ) vinculavisitaadvogado
     """)
 
     tabela = "tmp_base_vinculo_advogado"
@@ -143,7 +210,23 @@ def executar(spark, path=path):
                 '/',
                 upper(trim(regexp_replace(coalesce(estado, ''), '\\\\s+', ' ')))
             ) as documento_advogado_oab
+        from (
+        select
+            id,
+            nome,
+            estado,
+            oab
         from bronze.livros_acesso_unidade_advogado
+
+        union all
+
+        select
+            id,
+            nome,
+            estado,
+            oab
+        from bronze.livros_acesso_unidade_historicaladvogado
+    ) advogado
     """)
 
     tabela = "tmp_base_cadastro_advogado"
@@ -255,7 +338,25 @@ def executar(spark, path=path):
             max(case when coalesce(bloquear_todos_internos, false) = true then 1 else 0 end) as flag_bloqueia_todos_internos,
             max(case when coalesce(bloquear_todos_presidios, false) = true then 1 else 0 end) as flag_bloqueia_todos_presidios,
             count(*) as qtd_restricoes
+        from (
+        select
+            advogado_id,
+            interno_id,
+            presidio_id,
+            bloquear_todos_internos,
+            bloquear_todos_presidios
         from bronze.livros_acesso_unidade_restricaoadvogado
+
+        union all
+
+        select
+            advogado_id,
+            interno_id,
+            presidio_id,
+            bloquear_todos_internos,
+            bloquear_todos_presidios
+        from bronze.livros_acesso_unidade_historicalrestricaoadvogado
+    ) restricaoadvogado
         group by
             cast(advogado_id as string),
             cast(interno_id as string),
@@ -368,11 +469,14 @@ def executar(spark, path=path):
 
     df_base_pessoa_advogado = spark.sql("""
         select distinct
+            id_preso as id_preso_advogado,
             id_pessoa as id_pessoa_advogado,
             documento as documento_advogado,
             nome_pessoa as nome_advogado_pessoa
         from gold.sinp_ent_pessoa
         where coalesce(flag_advogado, 0) = 1
+          and id_preso is not null
+          and id_preso like 'OAB_%'
     """)
 
     tabela = "tmp_base_pessoa_advogado"
@@ -490,7 +594,7 @@ def executar(spark, path=path):
         left join gold.tmp_base_cadastro_advogado cad
             on trim(e.id_advogado_origem) = trim(cad.id_advogado_origem)
         left join gold.tmp_base_pessoa_advogado pa
-            on cad.id_pessoa_advogado_chave = pa.id_pessoa_advogado
+            on cad.id_pessoa_advogado_chave = pa.id_preso_advogado
         left join gold.tmp_base_restricao_advogado_interno ri
             on trim(e.id_advogado_origem) = trim(ri.id_advogado_origem)
            and trim(e.id_interno_origem) = trim(ri.id_interno_origem)
@@ -728,5 +832,3 @@ def executar(spark, path=path):
 
     write_impala_table_partioned(df_fat_visita_advogado, "gold", tabela, f"{path}{tabela}")
     enviar_gold_para_postgres(f"gold.{tabela}", "id_fato_visita_advogado")
-
-

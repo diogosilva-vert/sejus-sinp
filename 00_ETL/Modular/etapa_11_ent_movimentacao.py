@@ -3,7 +3,9 @@
 
 from contexto import *
 
-def executar(spark, path=path):
+def executar(spark, path=None):
+    if path is None:
+        path = "/data_lake/gold/intlpris/"
     """Etapa extraída do notebook original."""
     # ===== CELL 32 =====
     import os
@@ -29,9 +31,14 @@ def executar(spark, path=path):
         "tmp_base_agg_pessoa_movimentacao",
         "tmp_base_agg_policial_movimentacao",
         "tmp_base_agg_infopen_movimentacao",
+        "tmp_matriz_orgao_veiculo",
+        "tmp_matriz_marca_modelo_veiculo",
+        "tmp_matriz_marca_veiculo",
+        "tmp_base_veiculo_parse",
         "tmp_base_veiculo_raw",
         "tmp_base_rl_movimentacao_veiculo",
         "sinp_ent_movimentacao",
+        "sinp_fato_movimentacao",
         "sinp_ent_veiculo",
         "sinp_rl_pessoa_movimentacao",
         "sinp_rl_movimentacao_veiculo",
@@ -392,6 +399,7 @@ def executar(spark, path=path):
             p.tipo_movimentacao,
             p.id_evento_origem,
             p.id_item_origem,
+            pp.id_pessoa_presidiario as id_pessoa,
             p.nome_policial_raw,
             p.documento_policial_raw,
             p.flag_condutor,
@@ -406,6 +414,8 @@ def executar(spark, path=path):
         inner join gold.tmp_base_movimentacao_header h
             on p.tipo_movimentacao = h.tipo_movimentacao
            and p.id_evento_origem = h.id_evento_origem
+        left join gold.tmp_base_pessoa_preso_ponte_movimentacao pp
+            on trim(cast(p.documento_policial_raw as string)) = trim(cast(pp.id_preso_origem as string))
     """)
 
     tabela = "tmp_base_policial_movimentacao_raw"
@@ -539,6 +549,7 @@ def executar(spark, path=path):
             tipo_movimentacao,
             id_evento_origem,
             id_item_origem,
+            id_pessoa,
             nome_policial_raw,
             documento_policial_raw,
             flag_condutor,
@@ -614,7 +625,7 @@ def executar(spark, path=path):
         select
             id_movimentacao,
             count(*) as qtd_policiais_relacionados,
-            count(distinct documento_policial_raw) as qtd_policiais_distintos,
+            count(distinct coalesce(id_pessoa, documento_policial_raw)) as qtd_policiais_distintos,
             sum(coalesce(flag_condutor, 0)) as qtd_condutores,
             concat_ws(
                 ' | ',
@@ -665,52 +676,574 @@ def executar(spark, path=path):
 
 
     # ============================================================
-    # VEICULO RAW - DEDUPLICADO CORRETAMENTE
+    # MATRIZ DE ORGAOS DE SEGURANCA PARA VEICULOS
+    # Atualizacao: alterar esta lista quando novos codigos aparecerem.
+    # ============================================================
+
+    matriz_orgao_veiculo = [
+        ("SEJUS", "SEJUS", 1),
+        ("SESP", "SESP", 2),
+        ("PC", "PC|POLICIA CIVIL", 3),
+        ("PP", "PP|POLICIA PENAL", 4),
+        ("DERP", "DERP", 5),
+        ("GLI", "GLI", 6),
+        ("SLGO", "SLGO", 7),
+        ("GRE", "GRE", 8)
+    ]
+
+    df_matriz_orgao_veiculo = spark.createDataFrame(
+        matriz_orgao_veiculo,
+        ["ds_orgao_seguranca", "regex_orgao", "prioridade_orgao"]
+    )
+
+    tabela = "tmp_matriz_orgao_veiculo"
+
+    df_matriz_orgao_veiculo.write \
+        .mode("overwrite") \
+        .option("maxRecordsPerFile", 1_000_000) \
+        .option("compression", "snappy") \
+        .parquet(f"{path}{tabela}")
+
+    write_impala_table_partioned(df_matriz_orgao_veiculo, "gold", tabela, f"{path}{tabela}")
+    spark.catalog.clearCache()
+    spark.sql("refresh table gold.tmp_matriz_orgao_veiculo")
+
+
+    # ============================================================
+    # MATRIZ DE MARCAS E MODELOS COMUNS NO BRASIL
+    # Atualizacao: alterar esta lista quando novos modelos aparecerem.
+    # Campos:
+    #   ds_marca_veiculo
+    #   ds_modelo_veiculo
+    #   termo_modelo_busca
+    #   prioridade_modelo
+    # ============================================================
+
+    matriz_marca_modelo_veiculo = [
+        ("FIAT", "STRADA", "STRADA", 1),
+        ("FIAT", "ARGO", "ARGO", 2),
+        ("FIAT", "MOBI", "MOBI", 3),
+        ("FIAT", "TORO", "TORO", 4),
+        ("FIAT", "CRONOS", "CRONOS", 5),
+        ("FIAT", "PULSE", "PULSE", 6),
+        ("FIAT", "FASTBACK", "FASTBACK", 7),
+        ("FIAT", "FIORINO", "FIORINO", 8),
+        ("FIAT", "UNO", "UNO", 9),
+        ("FIAT", "PALIO", "PALIO", 10),
+        ("FIAT", "SIENA", "SIENA", 11),
+        ("FIAT", "DUCATO", "DUCATO", 12),
+        ("FIAT", "DOBLO", "DOBLO", 13),
+
+        ("VOLKSWAGEN", "POLO", "POLO", 20),
+        ("VOLKSWAGEN", "T-CROSS", "T CROSS", 21),
+        ("VOLKSWAGEN", "T-CROSS", "TCROSS", 22),
+        ("VOLKSWAGEN", "GOL", "GOL", 23),
+        ("VOLKSWAGEN", "SAVEIRO", "SAVEIRO", 24),
+        ("VOLKSWAGEN", "NIVUS", "NIVUS", 25),
+        ("VOLKSWAGEN", "VIRTUS", "VIRTUS", 26),
+        ("VOLKSWAGEN", "VOYAGE", "VOYAGE", 27),
+        ("VOLKSWAGEN", "FOX", "FOX", 28),
+        ("VOLKSWAGEN", "AMAROK", "AMAROK", 29),
+        ("VOLKSWAGEN", "JETTA", "JETTA", 30),
+        ("VOLKSWAGEN", "UP", "UP", 31),
+
+        ("CHEVROLET", "ONIX PLUS", "ONIX PLUS", 40),
+        ("CHEVROLET", "ONIX", "ONIX", 41),
+        ("CHEVROLET", "TRACKER", "TRACKER", 42),
+        ("CHEVROLET", "S10", "S10", 43),
+        ("CHEVROLET", "SPIN", "SPIN", 44),
+        ("CHEVROLET", "MONTANA", "MONTANA", 45),
+        ("CHEVROLET", "CRUZE", "CRUZE", 46),
+        ("CHEVROLET", "PRISMA", "PRISMA", 47),
+        ("CHEVROLET", "COBALT", "COBALT", 48),
+        ("CHEVROLET", "CORSA", "CORSA", 49),
+        ("CHEVROLET", "CELTA", "CELTA", 50),
+        ("CHEVROLET", "MERIVA", "MERIVA", 51),
+        ("CHEVROLET", "ZAFIRA", "ZAFIRA", 52),
+
+        ("HYUNDAI", "HB20", "HB20", 60),
+        ("HYUNDAI", "CRETA", "CRETA", 61),
+        ("HYUNDAI", "TUCSON", "TUCSON", 62),
+        ("HYUNDAI", "SANTA FE", "SANTA FE", 63),
+        ("HYUNDAI", "IX35", "IX35", 64),
+        ("HYUNDAI", "I30", "I30", 65),
+
+        ("TOYOTA", "COROLLA CROSS", "COROLLA CROSS", 70),
+        ("TOYOTA", "COROLLA", "COROLLA", 71),
+        ("TOYOTA", "HILUX", "HILUX", 72),
+        ("TOYOTA", "HILUX", "HILLUX", 72),
+        ("TOYOTA", "SW4", "SW4", 73),
+        ("TOYOTA", "YARIS", "YARIS", 74),
+        ("TOYOTA", "ETIOS", "ETIOS", 75),
+        ("TOYOTA", "BANDEIRANTE", "BANDEIRANTE", 76),
+
+        ("RENAULT", "KWID", "KWID", 80),
+        ("RENAULT", "SANDERO", "SANDERO", 81),
+        ("RENAULT", "LOGAN", "LOGAN", 82),
+        ("RENAULT", "DUSTER", "DUSTER", 83),
+        ("RENAULT", "OROCH", "OROCH", 84),
+        ("RENAULT", "MASTER", "MASTER", 85),
+        ("RENAULT", "CLIO", "CLIO", 86),
+        ("RENAULT", "KANGOO", "KANGOO", 87),
+
+        ("FORD", "RANGER", "RANGER", 90),
+        ("FORD", "KA", "KA", 91),
+        ("FORD", "ECOSPORT", "ECOSPORT", 92),
+        ("FORD", "FIESTA", "FIESTA", 93),
+        ("FORD", "FOCUS", "FOCUS", 94),
+        ("FORD", "FUSION", "FUSION", 95),
+        ("FORD", "TRANSIT", "TRANSIT", 96),
+        ("FORD", "F1000", "F1000", 97),
+        ("FORD", "F-1000", "F 1000", 98),
+
+        ("HONDA", "HR-V", "HR V", 100),
+        ("HONDA", "WR-V", "WR V", 101),
+        ("HONDA", "CIVIC", "CIVIC", 102),
+        ("HONDA", "CITY", "CITY", 103),
+        ("HONDA", "FIT", "FIT", 104),
+        ("HONDA", "CR-V", "CR V", 105),
+
+        ("JEEP", "COMPASS", "COMPASS", 110),
+        ("JEEP", "RENEGADE", "RENEGADE", 111),
+        ("JEEP", "COMMANDER", "COMMANDER", 112),
+        ("JEEP", "CHEROKEE", "CHEROKEE", 113),
+        ("JEEP", "GRAND CHEROKEE", "GRAND CHEROKEE", 114),
+
+        ("NISSAN", "KICKS", "KICKS", 120),
+        ("NISSAN", "VERSA", "VERSA", 121),
+        ("NISSAN", "FRONTIER", "FRONTIER", 122),
+        ("NISSAN", "MARCH", "MARCH", 123),
+        ("NISSAN", "SENTRA", "SENTRA", 124),
+        ("NISSAN", "LIVINA", "LIVINA", 125),
+
+        ("PEUGEOT", "208", "208", 130),
+        ("PEUGEOT", "2008", "2008", 131),
+        ("PEUGEOT", "207", "207", 132),
+        ("PEUGEOT", "206", "206", 133),
+        ("PEUGEOT", "307", "307", 134),
+        ("PEUGEOT", "PARTNER", "PARTNER", 135),
+        ("PEUGEOT", "EXPERT", "EXPERT", 136),
+        ("PEUGEOT", "BOXER", "BOXER", 137),
+
+        ("CITROEN", "C3 AIRCROSS", "C3 AIRCROSS", 140),
+        ("CITROEN", "C4 CACTUS", "C4 CACTUS", 141),
+        ("CITROEN", "BASALT", "BASALT", 142),
+        ("CITROEN", "C3", "C3", 143),
+        ("CITROEN", "C4", "C4", 144),
+        ("CITROEN", "AIRCROSS", "AIRCROSS", 145),
+        ("CITROEN", "JUMPER", "JUMPER", 146),
+        ("CITROEN", "BERLINGO", "BERLINGO", 147),
+
+        ("MITSUBISHI", "L200", "L200", 150),
+        ("MITSUBISHI", "PAJERO", "PAJERO", 151),
+        ("MITSUBISHI", "ASX", "ASX", 152),
+        ("MITSUBISHI", "ECLIPSE CROSS", "ECLIPSE CROSS", 153),
+        ("MITSUBISHI", "OUTLANDER", "OUTLANDER", 154),
+
+        ("MERCEDES-BENZ", "SPRINTER", "SPRINTER", 160),
+        ("MERCEDES-BENZ", "ATEGO", "ATEGO", 161),
+        ("MERCEDES-BENZ", "ACCELO", "ACCELO", 162),
+        ("MERCEDES-BENZ", "AXOR", "AXOR", 163),
+
+        ("IVECO", "DAILY", "DAILY", 170),
+        ("IVECO", "TECTOR", "TECTOR", 171),
+        ("IVECO", "STRALIS", "STRALIS", 172),
+
+        ("VOLVO", "FH", "FH", 180),
+        ("VOLVO", "VM", "VM", 181),
+        ("VOLVO", "FM", "FM", 182),
+
+        ("SCANIA", "R440", "R440", 190),
+        ("SCANIA", "P310", "P310", 191),
+        ("SCANIA", "P360", "P360", 192),
+
+        ("BYD", "DOLPHIN MINI", "DOLPHIN MINI", 200),
+        ("BYD", "DOLPHIN", "DOLPHIN", 201),
+        ("BYD", "SONG", "SONG", 202),
+        ("BYD", "YUAN", "YUAN", 203),
+        ("BYD", "SEAL", "SEAL", 204),
+
+        ("GWM", "HAVAL H6", "HAVAL H6", 210),
+        ("GWM", "ORA 03", "ORA 03", 211)
+    ]
+
+    df_matriz_marca_modelo_veiculo = spark.createDataFrame(
+        matriz_marca_modelo_veiculo,
+        ["ds_marca_veiculo", "ds_modelo_veiculo", "termo_modelo_busca", "prioridade_modelo"]
+    )
+
+    tabela = "tmp_matriz_marca_modelo_veiculo"
+
+    df_matriz_marca_modelo_veiculo.write \
+        .mode("overwrite") \
+        .option("maxRecordsPerFile", 1_000_000) \
+        .option("compression", "snappy") \
+        .parquet(f"{path}{tabela}")
+
+    write_impala_table_partioned(df_matriz_marca_modelo_veiculo, "gold", tabela, f"{path}{tabela}")
+    spark.catalog.clearCache()
+    spark.sql("refresh table gold.tmp_matriz_marca_modelo_veiculo")
+
+
+    # ============================================================
+    # MATRIZ DE MARCAS
+    # Atualizacao: alterar esta lista quando novas marcas aparecerem.
+    # ============================================================
+
+    matriz_marca_veiculo = [
+        ("FIAT", "FIAT", 1),
+        ("VOLKSWAGEN", "VOLKSWAGEN", 2),
+        ("VOLKSWAGEN", "VW", 3),
+        ("CHEVROLET", "CHEVROLET", 4),
+        ("CHEVROLET", "GM", 5),
+        ("HYUNDAI", "HYUNDAI", 6),
+        ("TOYOTA", "TOYOTA", 7),
+        ("RENAULT", "RENAULT", 8),
+        ("FORD", "FORD", 9),
+        ("HONDA", "HONDA", 10),
+        ("JEEP", "JEEP", 11),
+        ("NISSAN", "NISSAN", 12),
+        ("PEUGEOT", "PEUGEOT", 13),
+        ("CITROEN", "CITROEN", 14),
+        ("MITSUBISHI", "MITSUBISHI", 15),
+        ("MERCEDES-BENZ", "MERCEDES", 16),
+        ("MERCEDES-BENZ", "MERCEDES BENZ", 17),
+        ("IVECO", "IVECO", 18),
+        ("VOLVO", "VOLVO", 19),
+        ("SCANIA", "SCANIA", 20),
+        ("BYD", "BYD", 21),
+        ("GWM", "GWM", 22)
+    ]
+
+    df_matriz_marca_veiculo = spark.createDataFrame(
+        matriz_marca_veiculo,
+        ["ds_marca_veiculo", "termo_marca_busca", "prioridade_marca"]
+    )
+
+    tabela = "tmp_matriz_marca_veiculo"
+
+    df_matriz_marca_veiculo.write \
+        .mode("overwrite") \
+        .option("maxRecordsPerFile", 1_000_000) \
+        .option("compression", "snappy") \
+        .parquet(f"{path}{tabela}")
+
+    write_impala_table_partioned(df_matriz_marca_veiculo, "gold", tabela, f"{path}{tabela}")
+    spark.catalog.clearCache()
+    spark.sql("refresh table gold.tmp_matriz_marca_veiculo")
+
+
+    # ============================================================
+    # PARSE VEICULO - CHAVE CANONICA PARA ENTIDADE E PONTE
+    # Regra:
+    #   1. Placa prevalece.
+    #   2. Orgao + matricula prevalece quando nao houver placa.
+    #   3. Raw normalizado fica como fallback.
+    #   4. A entidade veiculo e deduplicada por chave_veiculo.
+    #   5. A ponte usa o parse para apontar cada movimentacao ao id_veiculo canonico.
+    # ============================================================
+
+    regex_orgao_veiculo_limpeza = "|".join([x[1] for x in matriz_orgao_veiculo])
+
+    df_base_veiculo_parse = spark.sql(f"""
+        with origem as (
+            select
+                m.id_movimentacao,
+                m.dt_registro,
+                m.id_equipe_origem,
+                m.id_presidio_origem,
+                trim(regexp_replace(coalesce(m.veiculo_raw, ''), '\\\\s+', ' ')) as ds_veiculo_raw,
+                translate(
+                    upper(trim(regexp_replace(coalesce(m.veiculo_raw, ''), '\\\\s+', ' '))),
+                    'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ',
+                    'AAAAAEEEEIIIIOOOOOUUUUC'
+                ) as ds_veiculo_normalizado,
+                concat(
+                    ' ',
+                    regexp_replace(
+                        translate(
+                            upper(trim(regexp_replace(coalesce(m.veiculo_raw, ''), '\\\\s+', ' '))),
+                            'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ',
+                            'AAAAAEEEEIIIIOOOOOUUUUC'
+                        ),
+                        '[^A-Z0-9]+',
+                        ' '
+                    ),
+                    ' '
+                ) as ds_busca
+            from gold.tmp_base_movimentacao_header m
+            where trim(coalesce(m.veiculo_raw, '')) <> ''
+        ),
+
+        placa_extraida as (
+            select
+                id_movimentacao,
+                dt_registro,
+                id_equipe_origem,
+                id_presidio_origem,
+                ds_veiculo_raw,
+                ds_veiculo_normalizado,
+                ds_busca,
+                case
+                    when trim(coalesce(
+                        regexp_replace(
+                            regexp_extract(
+                                ds_veiculo_normalizado,
+                                '(^|\\\\s)([A-Z]{{3}})[ -]*([0-9]{{4}}|[0-9][A-Z0-9]{{3}})(?=$|\\\\s|[^A-Z0-9])',
+                                0
+                            ),
+                            '[^A-Z0-9]',
+                            ''
+                        ),
+                        ''
+                    )) <> ''
+                    then regexp_replace(
+                        regexp_extract(
+                            ds_veiculo_normalizado,
+                            '(^|\\\\s)([A-Z]{{3}})[ -]*([0-9]{{4}}|[0-9][A-Z0-9]{{3}})(?=$|\\\\s|[^A-Z0-9])',
+                            0
+                        ),
+                        '[^A-Z0-9]',
+                        ''
+                    )
+                    else cast(null as string)
+                end as ds_placa
+            from origem
+        ),
+
+        org_match as (
+            select *
+            from (
+                select
+                    p.id_movimentacao,
+                    p.ds_veiculo_raw,
+                    o.ds_orgao_seguranca,
+                    regexp_extract(
+                        p.ds_veiculo_normalizado,
+                        concat('(^|\\\\s)(', o.regex_orgao, ')(?:\\\\s+|[ -]+)*(?:N[º°]?|NO|NRO|NUM|NUMERO)?(?:\\\\s+|[ -]+)*([0-9]+)(?=$|\\\\s|[^A-Z0-9])'),
+                        3
+                    ) as nr_matricula_veiculo,
+                    row_number() over (
+                        partition by p.id_movimentacao, p.ds_veiculo_raw
+                        order by o.prioridade_orgao asc
+                    ) as rn
+                from placa_extraida p
+                inner join gold.tmp_matriz_orgao_veiculo o
+                    on regexp_extract(
+                        p.ds_veiculo_normalizado,
+                        concat('(^|\\\\s)(', o.regex_orgao, ')(?:\\\\s+|[ -]+)*(?:N[º°]?|NO|NRO|NUM|NUMERO)?(?:\\\\s+|[ -]+)*([0-9]+)(?=$|\\\\s|[^A-Z0-9])'),
+                        3
+                    ) <> ''
+            ) x
+            where rn = 1
+        ),
+
+        modelo_match as (
+            select *
+            from (
+                select
+                    p.id_movimentacao,
+                    p.ds_veiculo_raw,
+                    mm.ds_marca_veiculo,
+                    mm.ds_modelo_veiculo,
+                    row_number() over (
+                        partition by p.id_movimentacao, p.ds_veiculo_raw
+                        order by
+                            length(mm.termo_modelo_busca) desc,
+                            mm.prioridade_modelo asc
+                    ) as rn
+                from placa_extraida p
+                inner join gold.tmp_matriz_marca_modelo_veiculo mm
+                    on instr(p.ds_busca, concat(' ', mm.termo_modelo_busca, ' ')) > 0
+            ) x
+            where rn = 1
+        ),
+
+        marca_match as (
+            select *
+            from (
+                select
+                    p.id_movimentacao,
+                    p.ds_veiculo_raw,
+                    ma.ds_marca_veiculo,
+                    row_number() over (
+                        partition by p.id_movimentacao, p.ds_veiculo_raw
+                        order by
+                            length(ma.termo_marca_busca) desc,
+                            ma.prioridade_marca asc
+                    ) as rn
+                from placa_extraida p
+                inner join gold.tmp_matriz_marca_veiculo ma
+                    on instr(p.ds_busca, concat(' ', ma.termo_marca_busca, ' ')) > 0
+            ) x
+            where rn = 1
+        ),
+
+        enriquecida as (
+            select
+                p.id_movimentacao,
+                p.dt_registro,
+                p.id_equipe_origem,
+                p.id_presidio_origem,
+                p.ds_veiculo_raw,
+                p.ds_veiculo_normalizado,
+                p.ds_busca,
+                p.ds_placa,
+                o.ds_orgao_seguranca,
+                o.nr_matricula_veiculo,
+                coalesce(mo.ds_marca_veiculo, ma.ds_marca_veiculo) as ds_marca_veiculo,
+                mo.ds_modelo_veiculo
+            from placa_extraida p
+            left join org_match o
+                on p.id_movimentacao = o.id_movimentacao
+               and p.ds_veiculo_raw = o.ds_veiculo_raw
+            left join modelo_match mo
+                on p.id_movimentacao = mo.id_movimentacao
+               and p.ds_veiculo_raw = mo.ds_veiculo_raw
+            left join marca_match ma
+                on p.id_movimentacao = ma.id_movimentacao
+               and p.ds_veiculo_raw = ma.ds_veiculo_raw
+        ),
+
+        limpa as (
+            select
+                id_movimentacao,
+                dt_registro,
+                id_equipe_origem,
+                id_presidio_origem,
+                ds_veiculo_raw,
+                ds_veiculo_normalizado,
+                ds_placa,
+                ds_orgao_seguranca,
+                case
+                    when trim(coalesce(nr_matricula_veiculo, '')) <> '' then trim(nr_matricula_veiculo)
+                    else cast(null as string)
+                end as nr_matricula_veiculo,
+                ds_marca_veiculo,
+                ds_modelo_veiculo,
+                trim(
+                    regexp_replace(
+                        regexp_replace(
+                            regexp_replace(
+                                ds_veiculo_normalizado,
+                                '(^|\\\\s)([A-Z]{{3}})[ -]*([0-9]{{4}}|[0-9][A-Z0-9]{{3}})(?=$|\\\\s|[^A-Z0-9])',
+                                ' '
+                            ),
+                            concat('(^|\\\\s)(', '{regex_orgao_veiculo_limpeza}', ')(?:\\\\s+|[ -]+)*(?:N[º°]?|NO|NRO|NUM|NUMERO)?(?:\\\\s+|[ -]+)*[0-9]+(?=$|\\\\s|[^A-Z0-9])'),
+                            ' '
+                        ),
+                        '[^A-Z0-9]+',
+                        ' '
+                    )
+                ) as ds_veiculo_limpo
+            from enriquecida
+        ),
+
+        chaveada as (
+            select
+                id_movimentacao,
+                dt_registro,
+                id_equipe_origem,
+                id_presidio_origem,
+                ds_veiculo_raw,
+                ds_veiculo_normalizado,
+
+                case
+                    when ds_marca_veiculo is not null and ds_modelo_veiculo is not null
+                        then concat(ds_marca_veiculo, ' ', ds_modelo_veiculo)
+                    when ds_marca_veiculo is not null
+                        then ds_marca_veiculo
+                    when ds_veiculo_limpo is not null and trim(ds_veiculo_limpo) <> ''
+                        then ds_veiculo_limpo
+                    else cast(null as string)
+                end as ds_veiculo,
+
+                ds_marca_veiculo,
+                ds_modelo_veiculo,
+                ds_placa,
+                ds_orgao_seguranca,
+                nr_matricula_veiculo,
+
+                case
+                    when ds_placa is not null
+                        then concat('PLACA|', ds_placa)
+                    when ds_orgao_seguranca is not null and nr_matricula_veiculo is not null
+                        then concat('MATRICULA|', ds_orgao_seguranca, '|', nr_matricula_veiculo)
+                    else concat('RAW|', ds_veiculo_normalizado)
+                end as chave_veiculo
+            from limpa
+        )
+
+        select
+            concat('VEI_', md5(chave_veiculo)) as id_veiculo,
+            chave_veiculo,
+            id_movimentacao,
+            dt_registro,
+            id_equipe_origem,
+            id_presidio_origem,
+            ds_veiculo,
+            ds_marca_veiculo,
+            ds_modelo_veiculo,
+            ds_placa,
+            ds_orgao_seguranca,
+            nr_matricula_veiculo,
+            ds_veiculo_raw,
+            ds_veiculo_normalizado
+        from chaveada
+    """)
+
+    tabela = "tmp_base_veiculo_parse"
+
+    df_base_veiculo_parse.write \
+        .mode("overwrite") \
+        .option("maxRecordsPerFile", 1_000_000) \
+        .option("compression", "snappy") \
+        .parquet(f"{path}{tabela}")
+
+    write_impala_table_partioned(df_base_veiculo_parse, "gold", tabela, f"{path}{tabela}")
+    spark.catalog.clearCache()
+    spark.sql("refresh table gold.tmp_base_veiculo_parse")
+
+
+    # ============================================================
+    # VEICULO CANONICO - DEDUPLICADO POR PLACA / ORGAO+MATRICULA / RAW
     # ============================================================
 
     df_base_veiculo_raw = spark.sql("""
         select
             id_veiculo,
+            chave_veiculo,
             ds_veiculo,
+            ds_marca_veiculo,
+            ds_modelo_veiculo,
+            ds_placa,
+            ds_orgao_seguranca,
+            nr_matricula_veiculo,
+            ds_veiculo_raw,
             ds_veiculo_normalizado
         from (
             select
-                concat(
-                    'VEI_',
-                    md5(
-                        concat_ws(
-                            '|',
-                            upper(trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' ')))
-                        )
-                    )
-                ) as id_veiculo,
-
-                trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' ')) as ds_veiculo,
-
-                upper(trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' '))) as ds_veiculo_normalizado,
-
+                id_veiculo,
+                chave_veiculo,
+                ds_veiculo,
+                ds_marca_veiculo,
+                ds_modelo_veiculo,
+                ds_placa,
+                ds_orgao_seguranca,
+                nr_matricula_veiculo,
+                ds_veiculo_raw,
+                ds_veiculo_normalizado,
                 row_number() over (
-                    partition by
-                        concat(
-                            'VEI_',
-                            md5(
-                                concat_ws(
-                                    '|',
-                                    upper(trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' ')))
-                                )
-                            )
-                        )
+                    partition by chave_veiculo
                     order by
-                        case
-                            when trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' ')) =
-                                 upper(trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' ')))
-                            then 1 else 2
-                        end,
-                        length(trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' '))) desc,
-                        trim(regexp_replace(coalesce(veiculo_raw, ''), '\\\\s+', ' ')) asc
+                        case when ds_placa is not null then 0 else 1 end,
+                        case when ds_orgao_seguranca is not null and nr_matricula_veiculo is not null then 0 else 1 end,
+                        case when ds_marca_veiculo is not null and ds_modelo_veiculo is not null then 0 else 1 end,
+                        length(coalesce(ds_veiculo, '')) desc,
+                        length(coalesce(ds_veiculo_raw, '')) desc,
+                        ds_veiculo_raw asc
                 ) as rn
-            from gold.tmp_base_movimentacao_header
-            where trim(coalesce(veiculo_raw, '')) <> ''
+            from gold.tmp_base_veiculo_parse
         ) x
         where rn = 1
     """)
@@ -729,7 +1262,7 @@ def executar(spark, path=path):
 
 
     # ============================================================
-    # RL MOVIMENTACAO X VEICULO
+    # RL MOVIMENTACAO X VEICULO - BASEADA NO PARSE CANONICO
     # ============================================================
 
     df_base_rl_movimentacao_veiculo = spark.sql("""
@@ -739,20 +1272,19 @@ def executar(spark, path=path):
                 md5(
                     concat_ws(
                         '|',
-                        coalesce(m.id_movimentacao, ''),
+                        coalesce(p.id_movimentacao, ''),
                         coalesce(v.id_veiculo, '')
                     )
                 )
             ) as id_rl_movimentacao_veiculo,
-            m.id_movimentacao,
+            p.id_movimentacao,
             v.id_veiculo,
-            m.dt_registro,
-            m.id_equipe_origem,
-            m.id_presidio_origem
-        from gold.tmp_base_movimentacao_header m
+            p.dt_registro,
+            p.id_equipe_origem,
+            p.id_presidio_origem
+        from gold.tmp_base_veiculo_parse p
         inner join gold.tmp_base_veiculo_raw v
-            on upper(trim(regexp_replace(coalesce(m.veiculo_raw, ''), '\\\\s+', ' '))) = v.ds_veiculo_normalizado
-        where trim(coalesce(m.veiculo_raw, '')) <> ''
+            on p.chave_veiculo = v.chave_veiculo
     """)
 
     tabela = "tmp_base_rl_movimentacao_veiculo"
@@ -775,7 +1307,13 @@ def executar(spark, path=path):
     df_ent_veiculo = spark.sql("""
         select
             id_veiculo,
-            ds_veiculo
+            ds_veiculo,
+            ds_marca_veiculo,
+            ds_modelo_veiculo,
+            ds_placa,
+            ds_orgao_seguranca,
+            nr_matricula_veiculo,
+            ds_veiculo_raw
         from gold.tmp_base_veiculo_raw
     """)
 
@@ -792,10 +1330,10 @@ def executar(spark, path=path):
 
 
     # ============================================================
-    # ENTIDADE MOVIMENTACAO
+    # FATO MOVIMENTACAO
     # ============================================================
 
-    df_ent_movimentacao = spark.sql("""
+    df_fato_movimentacao = spark.sql("""
         select
             h.id_movimentacao,
             h.id_evento_origem,
@@ -848,15 +1386,15 @@ def executar(spark, path=path):
             on h.id_movimentacao = i.id_movimentacao
     """)
 
-    tabela = "sinp_ent_movimentacao"
+    tabela = "sinp_fato_movimentacao"
 
-    df_ent_movimentacao.write \
+    df_fato_movimentacao.write \
         .mode("overwrite") \
         .option("maxRecordsPerFile", 1_000_000) \
         .option("compression", "snappy") \
         .parquet(f"{path}{tabela}")
 
-    write_impala_table_partioned(df_ent_movimentacao, "gold", tabela, f"{path}{tabela}")
+    write_impala_table_partioned(df_fato_movimentacao, "gold", tabela, f"{path}{tabela}")
     enviar_gold_para_postgres(f"gold.{tabela}", "id_movimentacao")
 
 
@@ -933,6 +1471,7 @@ def executar(spark, path=path):
             tipo_movimentacao,
             id_evento_origem,
             id_item_origem,
+            id_pessoa,
             nome_policial_raw,
             documento_policial_raw,
             flag_condutor,
@@ -984,7 +1523,7 @@ def executar(spark, path=path):
         sum(flag_movimentacao_coletiva) as movimentacoes_coletivas,
         sum(flag_tem_veiculo) as movimentacoes_com_veiculo,
         sum(flag_tem_movimentacao_infopen_mesmo_dia) as movimentacoes_com_ctx_infopen
-    from gold.sinp_ent_movimentacao
+    from gold.sinp_fato_movimentacao
     group by tipo_movimentacao
     order by tipo_movimentacao
     """).show(truncate=False)

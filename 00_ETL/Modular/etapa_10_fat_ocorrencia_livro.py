@@ -3,7 +3,9 @@
 
 from contexto import *
 
-def executar(spark, path=path):
+def executar(spark, path=None):
+    if path is None:
+        path = "/data_lake/gold/intlpris/"
     """Etapa extraída do notebook original."""
     # ===== CELL 26 =====
     import os
@@ -31,12 +33,6 @@ def executar(spark, path=path):
     col_id_interno = pick_col(cols_interno, ["id"], True, "id do interno")
     col_infopen = pick_col(cols_interno, ["infopen", "id_preso", "preso_id"], True, "chave INFOPEN do interno")
     col_nome_interno = pick_col(cols_interno, ["nome", "interno", "nome_interno", "descricao"], True, "nome do interno")
-
-    print("Tabela ponte detectada:")
-    print(f"id interno   : {col_id_interno}")
-    print(f"id infopen   : {col_infopen}")
-    print(f"nome interno : {col_nome_interno}")
-
 
     # ============================================================
     # LIMPEZA DEFENSIVA
@@ -1075,7 +1071,6 @@ def executar(spark, path=path):
     from datetime import datetime
 
     import pandas as pd
-    from pyspark.sql import functions as F
     from pyspark.sql import types as T
 
     # ============================================================
@@ -2468,50 +2463,5 @@ def executar(spark, path=path):
 
     write_impala_table_partioned(df_rl_ocorrencia_livro_cenario_final, "gold", tabela, f"{path}{tabela}")
     enviar_gold_para_postgres(f"gold.{tabela}", "id_cenario_ocorrencia_livro")
-
-
-    # ============================================================
-    # VALIDACOES
-    # ============================================================
-
-    spark.sql("""
-    select
-        count(*) as total_ocorrencias,
-        sum(case when qtd_cenarios_disparados > 0 then 1 else 0 end) as ocorrencias_com_sinal,
-        sum(case when criticidade_cenario_maxima = 'CRITICA' then 1 else 0 end) as ocorrencias_criticas,
-        sum(case when criticidade_cenario_maxima = 'ALTA' then 1 else 0 end) as ocorrencias_altas
-    from gold.sinp_fat_ocorrencia_livro_risco
-    """).show(truncate=False)
-
-    spark.sql("""
-    select
-        scenario_code,
-        scenario_name,
-        count(*) as qtd
-    from gold.sinp_rl_ocorrencia_livro_cenario
-    group by scenario_code, scenario_name
-    order by qtd desc, scenario_code
-    """).show(200, truncate=False)
-
-    spark.sql("""
-    select
-        criticidade_cenario,
-        count(*) as qtd
-    from gold.sinp_rl_ocorrencia_livro_cenario
-    group by criticidade_cenario
-    order by qtd desc
-    """).show(truncate=False)
-
-    spark.sql("""
-    select
-        id_fato_ocorrencia,
-        scenario_code,
-        scenario_name,
-        score_cenario,
-        criticidade_cenario,
-        reason
-    from gold.sinp_rl_ocorrencia_livro_cenario
-    order by score_cenario desc, scenario_code
-    """).show(200, truncate=False)
 
 

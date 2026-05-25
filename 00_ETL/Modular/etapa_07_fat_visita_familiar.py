@@ -3,7 +3,9 @@
 
 from contexto import *
 
-def executar(spark, path=path):
+def executar(spark, path=None):
+    if path is None:
+        path = "/data_lake/gold/intlpris/"
     """Etapa extraída do notebook original."""
     # ===== CELL 23 =====
     import os
@@ -37,7 +39,7 @@ def executar(spark, path=path):
     os.system(f"hdfs dfs -rm -r -skipTrash {path}sinp_fat_visita_familiar >/dev/null 2>&1")
 
     spark.catalog.clearCache()
-    spark.sql("refresh table gold.df_pessoa_final_familiar")
+    #spark.sql("refresh table gold.df_pessoa_final_familiar")
     spark.sql("refresh table gold.sinp_pnt_pessoa_preso")
     spark.sql("refresh table gold.sinp_ent_pessoa")
     spark.sql("refresh table bronze.livros_acesso_unidade_controlefamiliares")
@@ -154,7 +156,7 @@ def executar(spark, path=path):
     # ============================================================
 
     df_base_pessoa_familiar = spark.sql("""
-        select
+        select distinct
             id_pessoa as id_pessoa_visitante,
             documento as documento_visitante,
             nome_pessoa as nome_visitante_pessoa,
@@ -170,8 +172,10 @@ def executar(spark, path=path):
                         upper(regexp_replace(coalesce(documento, ''), '[^0-9A-Za-z]', ''))
                     )
             end as chave_documento
-        from gold.df_pessoa_final_familiar
+        from gold.sinp_ent_pessoa
         where coalesce(flag_visitante, 0) = 1
+          and documento is not null
+          and trim(documento) <> ''
     """)
 
     tabela = "tmp_base_pessoa_familiar"
@@ -639,45 +643,4 @@ def executar(spark, path=path):
 
     write_impala_table_partioned(df_fat_visita_familiar, "gold", tabela, f"{path}{tabela}")
     enviar_gold_para_postgres(f"gold.{tabela}", "id_fato_visita_familiar")
-
-
-    # ============================================================
-    # VALIDACAO RAPIDA
-    # ============================================================
-
-    spark.sql("""
-    select
-        count(*) as total_eventos,
-        sum(case when id_pessoa_visitante is not null then 1 else 0 end) as eventos_com_visitante_resolvido,
-        sum(case when id_preso_presidiario is not null then 1 else 0 end) as eventos_com_id_preso_presidiario,
-        sum(case when id_pessoa_presidiario is not null then 1 else 0 end) as eventos_com_id_pessoa_presidiario
-    from gold.sinp_fat_visita_familiar
-    """).show(truncate=False)
-
-    spark.sql("""
-    select
-        origem_resolucao_presidiario,
-        count(*) as qtd
-    from gold.sinp_fat_visita_familiar
-    group by origem_resolucao_presidiario
-    order by qtd desc
-    """).show(truncate=False)
-
-    spark.sql("""
-    select
-        id_fato_visita_familiar,
-        id_evento_origem,
-        id_vinculo_origem,
-        id_interno_origem,
-        id_preso_infopen,
-        id_preso_presidiario,
-        id_pessoa_presidiario,
-        nome_visitante,
-        nome_presidiario_pessoa,
-        tipo_visita,
-        dt_evento_referencia
-    from gold.sinp_fat_visita_familiar
-    order by dt_evento_referencia desc
-    """).show(100, False)
-
 

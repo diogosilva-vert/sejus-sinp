@@ -3,7 +3,9 @@
 
 from contexto import *
 
-def executar(spark, path=path):
+def executar(spark, path=None):
+    if path is None:
+        path = "/data_lake/gold/intlpris/"
     """Etapa extraída do notebook original."""
     # ===== CELL 25 =====
     import os
