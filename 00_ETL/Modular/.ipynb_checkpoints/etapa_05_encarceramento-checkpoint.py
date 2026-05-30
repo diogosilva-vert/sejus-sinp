@@ -1020,11 +1020,3 @@ def executar(spark, path=None):
         f"gold.{tabela}",
         "id_encarceramento_inconsistencia"
     )
-
-    spark.sql(f"""
-        select
-            '{tabela}' as tabela,
-            count(*) as total_registros,
-            count(distinct id_encarceramento_inconsistencia) as total_ids
-        from gold.{tabela}
-    """).show(truncate=False)
